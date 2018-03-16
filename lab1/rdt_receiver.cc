@@ -8,30 +8,32 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string>
-#include <map>
 
 #include "rdt_struct.h"
 #include "rdt_receiver.h"
 #include "rdt_protocol.h"
 
 
-bool packet_received[RDT_MAX_SEQ_NO] = {};
 int last_end_of_msg = -1;
 
 class ReceiveInfo {
 public:
+    bool received;
     bool is_end;
     std::string data;
-    ReceiveInfo(): is_end(false) {}
-    ReceiveInfo(bool i, std::string d): is_end(i), data(d) {}
+    ReceiveInfo(): received(false), is_end(false) {}
 };
 
-std::map<int, ReceiveInfo> message_received;
+ReceiveInfo receiver_packets[RDT_MAX_SEQ_NO];
+
 
 /* receiver initialization, called once at the very beginning */
 void Receiver_Init()
 {
     fprintf(stdout, "At %.2fs: receiver initializing ...\n", GetSimulationTime());
+
+    for (int i = 0; i < RDT_MAX_SEQ_NO; ++i)
+        receiver_packets[i].received = false;
 }
 
 /* receiver finalization, called once at the very end.
@@ -97,18 +99,19 @@ void Receiver_FromLowerLayer(struct packet *pkt)
     Receiver_ConstructAck(seq_no, &ackpkt);
     Receiver_ToLowerLayer(&ackpkt);
 
-    packet_received[seq_no] = true;
-    message_received[seq_no] = ReceiveInfo(end_of_msg, std::string(payload, payload_size));
-    // printf("Receiver: ack [%d] %s\n", seq_no, std::string(payload, payload_size).c_str()); //###
+    receiver_packets[seq_no].received = true;
+    receiver_packets[seq_no].is_end = end_of_msg;
+    receiver_packets[seq_no].data = std::string(payload, payload_size);
+    // printf("Receiver: ack [%d] %s\n", seq_no, receiver_packets[seq_no].data.c_str()); //###
 
     for (int i = last_end_of_msg + 1; ; ++i) {
-        if (!packet_received[i])
+        if (!receiver_packets[i].received)
             break;
-        if (message_received[i].is_end) {
+        if (receiver_packets[i].is_end) {
             message.clear();
 
             for (int j = last_end_of_msg + 1; j <= i; ++j)
-                message += message_received[j].data;
+                message += receiver_packets[j].data;
 
             msg.size = message.size();
             msg.data = (char*)(long)message.c_str();

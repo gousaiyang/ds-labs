@@ -7,30 +7,31 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <queue>
-#include <map>
 // #include <string>//###
 
 #include "rdt_struct.h"
 #include "rdt_sender.h"
 #include "rdt_protocol.h"
 
-bool packet_acked[RDT_MAX_SEQ_NO] = {};
-int seq_no = 0;
-int seq_no_wait = 0;
-const int window_size = 10;
-const double timeout = 0.3;
 
-class SenderTask {
+bool sending_started = false;
+int seq_no = 0;
+int last_seq_no = -1;
+const double timeout = 0.3;
+const double timer_interval = 0.1;
+int nothing = 0;
+int max_nothing = 10;
+
+class PacketInfo {
 public:
-    int seq_no;
     packet *pkt;
-    SenderTask(): seq_no(0), pkt(NULL) {}
-    SenderTask(int s, packet *p): seq_no(s), pkt(p) {}
+    double send_time;
+    bool acked;
+    PacketInfo(): pkt(NULL), send_time(0.0), acked(false) {}
 };
 
-std::queue<SenderTask> packet_queue;
-std::map<int, packet*> packet_wait_ack;
+PacketInfo sender_packets[RDT_MAX_SEQ_NO];
+
 
 /* sender initialization, called once at the very beginning */
 void Sender_Init()
@@ -85,38 +86,6 @@ bool Sender_CheckAck(packet *pkt, int *seq_no)
     return true;
 }
 
-void Sender_DoQueue()
-{
-    // printf("Sender: scanning queue\n"); //###
-    SenderTask st;
-
-    while (!packet_queue.empty()) {
-        st = packet_queue.front();
-        if (st.seq_no >= window_size && !packet_acked[st.seq_no - window_size]) {
-            seq_no_wait = st.seq_no - window_size;
-            // printf("Sender: packet %d not acked yet, start timer\n", seq_no_wait); //###
-            if (!Sender_isTimerSet())
-                Sender_StartTimer(timeout);
-            return;
-        }
-
-        // printf("Sender: send [%d] %s\n", st.seq_no, std::string(st.pkt->data + RDT_HEADER_SIZE, st.pkt->data[0] >> 1 & ((1 << RDT_PAYLOAD_SIZE_BITS) - 1)).c_str()); //###
-        Sender_ToLowerLayer(st.pkt);
-        packet_wait_ack[st.seq_no] = st.pkt;
-        packet_queue.pop();
-    }
-
-    for (std::map<int, packet*>::iterator it = packet_wait_ack.begin(); it != packet_wait_ack.end(); ++it) {
-        if (!packet_acked[it->first]) {
-            seq_no_wait = it->first;
-            // printf("Sender: packet %d not acked yet, start timer\n", seq_no_wait); //###
-            if (!Sender_isTimerSet())
-                Sender_StartTimer(timeout);
-            return;
-        }
-    }
-}
-
 /* event handler, called when a message is passed from the upper layer at the
    sender */
 void Sender_FromUpperLayer(struct message *msg)
@@ -129,6 +98,13 @@ void Sender_FromUpperLayer(struct message *msg)
 
     ASSERT(msg->data);
 
+    if (!sending_started) {
+        sending_started = true;
+        Sender_StartTimer(timer_interval);
+    }
+
+    double current_time = GetSimulationTime();
+
     // printf("Sender: want to transmit %s\n", std::string(msg->data, msg->size).c_str()); //###
 
     int last_payload_size = msg->size % RDT_MAX_PAYLOAD_SIZE;
@@ -137,20 +113,23 @@ void Sender_FromUpperLayer(struct message *msg)
 
     int whole_packets_num = (msg->size - last_payload_size) / RDT_MAX_PAYLOAD_SIZE;
     for (int i = 0; i < whole_packets_num; ++i) {
-        packet *pkt = (packet*)malloc(sizeof(packet));
-        Sender_ConstructPacket(RDT_MAX_PAYLOAD_SIZE, false, seq_no, msg->data + i * RDT_MAX_PAYLOAD_SIZE, pkt);
-        packet_queue.push(SenderTask(seq_no, pkt));
-        // printf("Sender: append task [%d] %s\n", seq_no, std::string(msg->data + i * RDT_MAX_PAYLOAD_SIZE, RDT_MAX_PAYLOAD_SIZE).c_str()); //###
+        sender_packets[seq_no].pkt = (packet*)malloc(sizeof(packet));
+        sender_packets[seq_no].send_time = current_time;
+        sender_packets[seq_no].acked = false;
+        Sender_ConstructPacket(RDT_MAX_PAYLOAD_SIZE, false, seq_no, msg->data + i * RDT_MAX_PAYLOAD_SIZE, sender_packets[seq_no].pkt);
+        Sender_ToLowerLayer(sender_packets[seq_no].pkt);
+        // printf("Sender: send [%d] %s\n", seq_no, std::string(msg->data + i * RDT_MAX_PAYLOAD_SIZE, RDT_MAX_PAYLOAD_SIZE).c_str()); //###
         Sender_IncrementSeq();
     }
 
-    packet *pkt = (packet*)malloc(sizeof(packet));
-    Sender_ConstructPacket(last_payload_size, true, seq_no, msg->data + whole_packets_num * RDT_MAX_PAYLOAD_SIZE, pkt);
-    packet_queue.push(SenderTask(seq_no, pkt));
-    // printf("Sender: append task [%d] %s\n", seq_no, std::string(msg->data + whole_packets_num * RDT_MAX_PAYLOAD_SIZE, last_payload_size).c_str()); //###
+    sender_packets[seq_no].pkt = (packet*)malloc(sizeof(packet));
+    sender_packets[seq_no].send_time = current_time;
+    sender_packets[seq_no].acked = false;
+    Sender_ConstructPacket(last_payload_size, true, seq_no, msg->data + whole_packets_num * RDT_MAX_PAYLOAD_SIZE,
+        sender_packets[seq_no].pkt);
+    Sender_ToLowerLayer(sender_packets[seq_no].pkt);
+    // printf("Sender: send [%d] %s\n", seq_no, std::string(msg->data + whole_packets_num * RDT_MAX_PAYLOAD_SIZE, last_payload_size).c_str()); //###
     Sender_IncrementSeq();
-
-    Sender_DoQueue();
 }
 
 /* event handler, called when a packet is passed from the lower layer at the
@@ -162,21 +141,30 @@ void Sender_FromLowerLayer(struct packet *pkt)
         return;
 
     // printf("Sender: got ack [%d]\n", seq_no); //###
-    packet_acked[seq_no] = true;
-    if (Sender_isTimerSet() && seq_no == seq_no_wait) {
-        Sender_StopTimer();
-        // printf("Sender: kill timer for [%d]\n", seq_no); //###
-    }
-    free(packet_wait_ack[seq_no]);
-    packet_wait_ack.erase(seq_no);
-
-    Sender_DoQueue();
+    sender_packets[seq_no].acked = true;
+    free(sender_packets[seq_no].pkt);
+    sender_packets[seq_no].pkt = NULL;
 }
 
 /* event handler, called when the timer expires */
 void Sender_Timeout()
 {
-    // printf("Sender: resend [%d]\n", seq_no_wait); //###
-    Sender_ToLowerLayer(packet_wait_ack[seq_no_wait]);
-    Sender_DoQueue();
+    double current_time = GetSimulationTime();
+    bool remaining = false;
+
+    for (int i = 0; i < seq_no; ++i) {
+        if (!sender_packets[i].acked) {
+            remaining = true;
+            if (current_time - sender_packets[i].send_time >= timeout) {
+                Sender_ToLowerLayer(sender_packets[i].pkt);
+                // printf("Sender: resend [%d]\n", i); //###
+            }
+        }
+    }
+
+    nothing = remaining || last_seq_no != seq_no ? 0 : nothing + 1;
+    last_seq_no = seq_no;
+
+    if (nothing < max_nothing)
+        Sender_StartTimer(timer_interval);
 }
