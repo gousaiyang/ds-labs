@@ -6,65 +6,32 @@
 #include "qos.h"
 
 #include <assert.h>
-#include <stdlib.h>
+#include <string.h>
 
 
 struct rte_meter_srtcm_params srtcm_params[APP_FLOWS_MAX];
 struct rte_meter_srtcm srtcm_data[APP_FLOWS_MAX];
-struct rte_red_config red_params[e_RTE_METER_COLORS];
-struct rte_red red_data[e_RTE_METER_COLORS];
+struct rte_red_config red_params[APP_FLOWS_MAX][e_RTE_METER_COLORS];
+struct rte_red red_data[APP_FLOWS_MAX][e_RTE_METER_COLORS];
 
-static const uint64_t clear_time = 1000;
+#define SRTCM_CONFIG(flow_id, cir_, cbs_, ebs_) do { \
+    srtcm_params[(flow_id)].cir = (cir_); \
+    srtcm_params[(flow_id)].cbs = (cbs_); \
+    srtcm_params[(flow_id)].ebs = (ebs_); \
+    if (rte_meter_srtcm_config(&srtcm_data[(flow_id)], &srtcm_params[(flow_id)]) != 0) \
+        rte_panic("Cannot init srTCM data\n"); \
+} while (0)
 
-typedef struct queue_node_* queue_node;
+#define RED_CONFIG(flow_id, color, wq_log2, min_th, max_th, maxp_inv) do { \
+    if (rte_red_config_init(&red_params[(flow_id)][(color)], (wq_log2), (min_th), (max_th), (maxp_inv)) != 0) \
+        rte_panic("Cannot init RED config\n"); \
+    if (rte_red_rt_data_init(&red_data[(flow_id)][(color)]) != 0) \
+        rte_panic("Cannot init RED data\n"); \
+} while (0)
 
-struct queue_node_ {
-    uint64_t time;
-    queue_node next;
-};
 
-static struct queue_node_ queue_head;
-static queue_node queue = &queue_head;
-
-static queue_node
-queue_new_node(uint64_t time)
-{
-    queue_node p = (queue_node)malloc(sizeof(struct queue_node_));
-    p->time = time;
-    p->next = NULL;
-    return p;
-}
-
-static void
-queue_push(uint64_t time)
-{
-    queue_node p = queue;
-
-    while (p->next)
-        p = p->next;
-
-    p->next = queue_new_node(time);
-}
-
-static unsigned
-queue_count(uint64_t time)
-{
-    queue_node p = queue->next;
-    unsigned cnt = 0;
-
-    while (p) {
-        if (time - p->time >= clear_time) {
-            queue->next = p->next;
-            free(p);
-            p = queue->next;
-        } else {
-            ++cnt;
-            p = p->next;
-        }
-    }
-
-    return cnt;
-}
+uint64_t last_time = 0;
+unsigned queue_size[APP_FLOWS_MAX] = {};
 
 
 /**
@@ -75,14 +42,10 @@ qos_meter_init(void)
 {
     /* to do */
 
-    int i;
-    for (i = 0; i < APP_FLOWS_MAX; ++i) {
-        srtcm_params[i].cir = 100;
-        srtcm_params[i].cbs = 1200;
-        srtcm_params[i].ebs = 2000;
-        if (rte_meter_srtcm_config(&srtcm_data[i], &srtcm_params[i]) != 0)
-            rte_panic("Cannot init srTCM info\n");
-    }
+    SRTCM_CONFIG(0, 2000, 1152, 1152);
+    SRTCM_CONFIG(1, 2000, 640, 640);
+    SRTCM_CONFIG(2, 2000, 384, 384);
+    SRTCM_CONFIG(3, 2000, 256, 256);
 
     return 0;
 }
@@ -106,17 +69,18 @@ qos_dropper_init(void)
 {
     /* to do */
 
-    int i;
-    for (i = 0; i < e_RTE_METER_COLORS; ++i) {
-        if (rte_red_config_init(&red_params[i], 2, 750, 1023, 2) != 0)
-            rte_panic("Cannot init RED config\n");
-
-        if (rte_red_rt_data_init(&red_data[i]) != 0)
-            rte_panic("Cannot init RED data\n");
-    }
-
-    queue_head.time = 0;
-    queue_head.next = NULL;
+    RED_CONFIG(0, GREEN, 12, 1022, 1023, 255);
+    RED_CONFIG(0, YELLOW, 12, 1, 2, 1);
+    RED_CONFIG(0, RED, 12, 1, 2, 1);
+    RED_CONFIG(1, GREEN, 12, 1022, 1023, 255);
+    RED_CONFIG(1, YELLOW, 12, 1, 2, 1);
+    RED_CONFIG(1, RED, 12, 1, 2, 1);
+    RED_CONFIG(2, GREEN, 12, 1022, 1023, 255);
+    RED_CONFIG(2, YELLOW, 12, 1, 2, 1);
+    RED_CONFIG(2, RED, 12, 1, 2, 1);
+    RED_CONFIG(3, GREEN, 12, 1022, 1023, 255);
+    RED_CONFIG(3, YELLOW, 12, 1, 2, 1);
+    RED_CONFIG(3, RED, 12, 1, 2, 1);
 
     return 0;
 }
@@ -126,11 +90,13 @@ qos_dropper_run(uint32_t flow_id, enum qos_color color, uint64_t time)
 {
     /* to do */
 
-    // Should we use flow_id?
-    int result = !!rte_red_enqueue(&red_params[color], &red_data[color], queue_count(time), time);
+    if (time != last_time)
+        memset(queue_size, 0, sizeof(queue_size));
+
+    int result = !!rte_red_enqueue(&red_params[flow_id][color], &red_data[flow_id][color], queue_size[flow_id], time);
 
     if (!result)
-        queue_push(time);
+        ++queue_size[flow_id];
 
     return result;
 }
