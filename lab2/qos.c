@@ -81,7 +81,7 @@ qos_meter_init(void)
         srtcm_params[i].cbs = 1200;
         srtcm_params[i].ebs = 2000;
         if (rte_meter_srtcm_config(&srtcm_data[i], &srtcm_params[i]) != 0)
-            rte_panic("Cannot init flow srTCM info\n");
+            rte_panic("Cannot init srTCM info\n");
     }
 
     return 0;
@@ -112,7 +112,7 @@ qos_dropper_init(void)
             rte_panic("Cannot init RED config\n");
 
         if (rte_red_rt_data_init(&red_data[i]) != 0)
-            rte_panic("Cannot init color RED info\n");
+            rte_panic("Cannot init RED data\n");
     }
 
     queue_head.time = 0;
@@ -127,6 +127,10 @@ qos_dropper_run(uint32_t flow_id, enum qos_color color, uint64_t time)
     /* to do */
 
     // Should we use flow_id?
-    queue_push(time);
-    return !!rte_red_enqueue(&red_params[color], &red_data[color], queue_count(time), time);
+    int result = !!rte_red_enqueue(&red_params[color], &red_data[color], queue_count(time), time);
+
+    if (!result)
+        queue_push(time);
+
+    return result;
 }
