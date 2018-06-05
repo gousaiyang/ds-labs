@@ -313,7 +313,7 @@ WHERE `id` = `did` AND `did` > 0 AND `did` < 1000 AND `date` IS NULL
 GROUP BY `type` ORDER BY `type` DESC;
 ```
 
-<p><div align="center">![](sql_stat1.png)</div></p>
+<p><div align="center"><img src="sql_stat1.png" /></div></p>
 
 Before running the second application, we should clear the `output` directory:
 
@@ -345,7 +345,7 @@ WHERE `did` > 0 AND `did` < 10 AND `date` IS NOT NULL
 GROUP BY `date`, `type` ORDER BY `date` DESC, `type`;
 ```
 
-<p><div align="center">![](sql_stat2.png)</div></p>
+<p><div align="center"><img src="sql_stat2.png" /></div></p>
 
 Finally, we stop all the services:
 
@@ -367,6 +367,6 @@ root@slave1:~/hadoop-2.9.1# ufw enable
 
 In container logs of master, we found:
 
-<p><div align="center">![](error_log.png)</div></p>
+<p><div align="center"><img src="error_log.png" /></div></p>
 
 The dead datanode (slave1) is abandoned by master, and master continues to work with other remaining datanodes smoothly. This validates the fault tolerant mechanism of Hadoop.
